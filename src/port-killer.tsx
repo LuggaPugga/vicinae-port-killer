@@ -1,112 +1,211 @@
-import React, { useState, useEffect } from "react";
-import { List, ActionPanel, Action, showToast, Icon } from "@vicinae/api";
-import { exec } from "child_process";
-import util from "util";
+import { exec } from "node:child_process";
+import util from "node:util";
+import { Action, ActionPanel, Icon, List, showToast } from "@vicinae/api";
+import { useEffect, useState } from "react";
 
 const execPromise = util.promisify(exec);
+
+const MIN_USER_PORT = 1024;
+const MAX_PORT = 65535;
 
 interface OpenPort {
 	protocol: string;
 	port: number;
-	pid: number;
+	pid: number | null;
 	process: string;
 	user: string;
 	address: string;
 }
 
 async function listOpenPorts(): Promise<OpenPort[]> {
-	const { stdout } = await execPromise("lsof -i -P -n | grep LISTEN || true");
-	const lines = stdout
-		.split("\n")
-		.map((l) => l.trim())
-		.filter((l) => l && !l.startsWith("COMMAND"));
+	try {
+		const { stdout } = await execPromise("ss -tulnp 2>/dev/null || true");
 
-	const result: OpenPort[] = [];
+		const lines = stdout
+			.split("\n")
+			.map((l) => l.trim())
+			.filter((l) => l && !l.startsWith("Netid") && !l.startsWith("State"));
 
-	for (const line of lines) {
-		const parts = line.split(/\s+/);
-		if (parts.length < 9) continue;
+		const result: OpenPort[] = [];
+		const seenPorts = new Set<string>();
 
-		const process = parts[0];
-		const pid = parseInt(parts[1], 10);
-		const user = parts[2];
-		const proto = parts[7];
-		const addressField = parts[8];
-		const portMatch =
-			addressField.match(/:(\d+)\)$/) || addressField.match(/:(\d+)$/);
-		const port = portMatch ? parseInt(portMatch[1], 10) : NaN;
+		for (const line of lines) {
+			const addressMatch = line.match(/^(\S+)\s+\S+\s+\S+\s+\S+\s+(\S+:\d+)/);
+			if (!addressMatch) continue;
 
-		if (!isNaN(port)) {
+			const protocol = addressMatch[1];
+			const localAddress = addressMatch[2];
+
+			let port: number | null = null;
+			const portMatch = localAddress.match(/:(\d+)$/);
+			if (portMatch) {
+				port = parseInt(portMatch[1], 10);
+			}
+
+			if (port === null || Number.isNaN(port)) continue;
+			if (port < MIN_USER_PORT || port > MAX_PORT) continue;
+
+			let process = "unknown";
+			let pid: number | null = null;
+
+			const usersMatch = line.match(/users:\(\((.+)\)\)/);
+			if (usersMatch) {
+				const usersContent = usersMatch[1];
+
+				const processMatch = usersContent.match(/"([^"]+)"/);
+				if (processMatch) {
+					process = processMatch[1];
+				}
+
+				const pidMatch = usersContent.match(/pid=(\d+)/);
+				if (pidMatch) {
+					pid = parseInt(pidMatch[1], 10);
+				}
+			}
+
+			const portKey = `${protocol}-${port}-${pid || "none"}`;
+			if (seenPorts.has(portKey)) continue;
+			seenPorts.add(portKey);
+
 			result.push({
-				protocol: proto,
+				protocol,
 				port,
 				pid,
 				process,
-				user,
-				address: addressField,
+				user: "current",
+				address: localAddress,
 			});
 		}
-	}
 
-	return result;
+		return result.sort((a, b) => {
+			if (a.process === "unknown" && b.process !== "unknown") return 1;
+			if (a.process !== "unknown" && b.process === "unknown") return -1;
+			return a.port - b.port;
+		});
+	} catch (error) {
+		console.error("Error listing ports:", error);
+		return [];
+	}
 }
 
 async function killProcessByPort(port: number): Promise<void> {
 	const ports = await listOpenPorts();
-	const targets = ports.filter((p) => p.port === port);
+	const targets = ports.filter((p) => p.port === port && p.pid !== null);
 
 	if (targets.length === 0) {
-		throw new Error(`No process found on port ${port}`);
+		throw new Error(`No killable process found on port ${port}`);
 	}
 
-  for (const target of targets) {
-    await execPromise(`kill -9 ${target.pid}`).catch(() => null);
-  }
+	const errors: string[] = [];
+	for (const target of targets) {
+		if (target.pid === null) continue;
+
+		try {
+			await execPromise(
+				`kill ${target.pid} 2>/dev/null || kill -9 ${target.pid} 2>/dev/null`,
+			);
+		} catch {
+			errors.push(`Failed to kill PID ${target.pid}`);
+		}
+	}
+
+	if (errors.length === targets.length) {
+		throw new Error(`Failed to kill all processes on port ${port}`);
+	}
+
+	await new Promise((resolve) => setTimeout(resolve, 100));
 }
 
 export default function PortKiller() {
 	const [ports, setPorts] = useState<OpenPort[]>([]);
+	const [isLoading, setIsLoading] = useState(true);
+
+	const refreshPorts = async () => {
+		setIsLoading(true);
+		try {
+			const newPorts = await listOpenPorts();
+			setPorts(newPorts);
+		} catch (error) {
+			showToast({
+				title: "Failed to list ports",
+				message: error instanceof Error ? error.message : "Unknown error",
+			});
+		} finally {
+			setIsLoading(false);
+		}
+	};
 
 	useEffect(() => {
-		listOpenPorts()
-			.then(setPorts)
-			.catch(() => showToast({ title: "Failed to list ports" }));
+		refreshPorts();
 	}, []);
 
+	const handleKillPort = async (port: OpenPort) => {
+		if (port.pid === null) {
+			showToast({
+				title: "Cannot kill port",
+				message: "No process ID available",
+			});
+			return;
+		}
+
+		try {
+			await killProcessByPort(port.port);
+			showToast({
+				title: `Killed process on port ${port.port}`,
+				message: `${port.process} (PID: ${port.pid})`,
+			});
+			await refreshPorts();
+		} catch (error) {
+			showToast({
+				title: "Failed to kill process",
+				message: error instanceof Error ? error.message : "Unknown error",
+			});
+		}
+	};
+
 	return (
-		<List searchBarPlaceholder="Search ports...">
-			<List.Section title={"Open Ports"}>
-				{ports.map((port) => (
-					<List.Item
-						key={`${port.pid}-${port.port}`}
-						title={`${port.process} (${port.port})`}
-						subtitle={`PID: ${port.pid}, User: ${port.user}, Protocol: ${port.protocol}`}
-						actions={
-							<ActionPanel>
-								<Action
-									title="Kill Port"
-									icon={Icon.Signal3}
-									onAction={async () => {
-										try {
-											await killProcessByPort(port.port);
-											setPorts((prev) =>
-												prev.filter((p) => p.port !== port.port),
-											);
-											showToast({
-												title: `Killed process on port ${port.port}`,
-											});
-											const newPorts = await listOpenPorts();
-											setPorts(newPorts);
-										} catch (e) {
-											showToast({ title: "Failed to kill process" });
-										}
-									}}
-								/>
-							</ActionPanel>
-						}
-					/>
-				))}
-			</List.Section>
+		<List
+			isLoading={isLoading}
+			searchBarPlaceholder="Search ports by number or process name..."
+		>
+			{ports.length === 0 && !isLoading ? (
+				<List.EmptyView
+					title="No open ports found"
+					description={`No listening ports found in range ${MIN_USER_PORT}-${MAX_PORT}`}
+				/>
+			) : (
+				<List.Section
+					title="Open Ports"
+					subtitle={`${ports.length} port${ports.length !== 1 ? "s" : ""} listening`}
+				>
+					{ports.map((port) => (
+						<List.Item
+							key={`${port.protocol}-${port.port}-${port.pid || "unknown"}`}
+							title={`Port ${port.port}`}
+							subtitle={`${port.process}${port.pid ? ` (PID: ${port.pid})` : ""}`}
+							accessories={[
+								{ text: port.protocol.toUpperCase() },
+								{ text: port.address },
+							]}
+							actions={
+								<ActionPanel>
+									<Action
+										title="Kill Process"
+										icon={Icon.XmarkCircle}
+										onAction={() => handleKillPort(port)}
+									/>
+									<Action
+										title="Refresh List"
+										icon={Icon.ArrowClockwise}
+										shortcut={{ modifiers: ["cmd"], key: "r" }}
+										onAction={refreshPorts}
+									/>
+								</ActionPanel>
+							}
+						/>
+					))}
+				</List.Section>
+			)}
 		</List>
 	);
 }

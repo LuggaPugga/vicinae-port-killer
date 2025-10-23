@@ -4,7 +4,7 @@
     "": {
       "name": "port-killer",
       "dependencies": {
-        "@vicinae/api": "^0.15.1",
+        "@vicinae/api": "^0.15.3",
       },
       "devDependencies": {
         "@biomejs/biome": "2.2.7",

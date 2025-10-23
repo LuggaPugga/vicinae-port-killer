@@ -1,6 +1,13 @@
 import { exec } from "node:child_process";
 import util from "node:util";
-import { Action, ActionPanel, Icon, List, showToast } from "@vicinae/api";
+import {
+	Action,
+	ActionPanel,
+	Clipboard,
+	Icon,
+	List,
+	showToast,
+} from "@vicinae/api";
 import { useEffect, useState } from "react";
 
 const execPromise = util.promisify(exec);
@@ -191,8 +198,37 @@ export default function PortKiller() {
 								<ActionPanel>
 									<Action
 										title="Kill Process"
-										icon={Icon.XmarkCircle}
+										icon={Icon.XMarkCircle}
 										onAction={() => handleKillPort(port)}
+									/>
+									<Action
+										title="Copy Port"
+										icon={Icon.CopyClipboard}
+										shortcut={{ modifiers: ["cmd"], key: "c" }}
+										onAction={async () =>
+											await Clipboard.copy({ text: port.port.toString() })
+										}
+									/>
+									<Action
+										title="Copy PID"
+										icon={Icon.CopyClipboard}
+										onAction={async () =>
+											await Clipboard.copy({ text: port.pid?.toString() ?? "" })
+										}
+									/>
+									<Action
+										title="Copy Address"
+										icon={Icon.CopyClipboard}
+										onAction={async () =>
+											await Clipboard.copy({ text: port.address })
+										}
+									/>
+									<Action
+										title="Copy Name"
+										icon={Icon.CopyClipboard}
+										onAction={async () =>
+											await Clipboard.copy({ text: port.process })
+										}
 									/>
 									<Action
 										title="Refresh List"
